@@ -3,10 +3,13 @@ var cluster = require('cluster');
 var express = require('express');
 var msgpack = require('msgpack');
 var bodyParser = require('body-parser');
+var http = require('http');
+var socketio = require('socket.io');
 var redis = require('redis');
 var Q = require('q');
 var os = require('os');
 
+//TODO pipe redis pub/sub through messagepack to socket.io
 if (cluster.isMaster) {
   for (var i = 0; i < os.cpus().length; i++) {
     cluster.fork();
@@ -16,60 +19,98 @@ else {
   var worker = cluster.worker;
 
   var app = express();
-  app.use(bodyParser.text({type: 'application/*'}));
+
+  var server = http.createServer(app);
+  var io = socketio(server);
 
   var redisClient = redis.createClient(6379, 'localhost', {return_buffers: true});
 
   var redisGet = Q.nbind(redisClient.get, redisClient);
   var redisSet = Q.nbind(redisClient.set, redisClient);
 
-  var log = function() {
+  function log() {
     return console.log.apply(console, ['worker', worker.id].concat(_.toArray(arguments)));
-  };
+  }
 
-  app.use(express.static('build'));
+  function get(key) {
+    log('get', key);
 
-  app.get('/get/:key', function(req, res) {
-    log('get', req.params.key);
-    redisGet(req.params.key).then(function(val) {
+    return redisGet(key).then(function(val) {
       try {
         log('packed value', val);
         val = msgpack.unpack(val);
         log('unpacked value', val);
       }
       catch (err) {
-        res.send(err);
+        console.log('error', err);
+        throw err;
       }
       finally {
-        res.set('Content-Type', 'application/json');
-        res.send(val);
+        return val;
       }
+    },
+    function(err) {
+      throw err;
+    });
+  }
+
+  function set(key, val) {
+    var defer = Q.defer();
+
+    log('set', key, val);
+
+    try {
+      val = JSON.parse(val);
+      val = msgpack.pack(val);
+    }
+    catch (err) {
+      log('error', err);
+      defer.reject(err);
+    }
+    finally {
+      redisSet(key, val).then(function() {
+        defer.resolve();
+      },
+      function(err) {
+        defer.reject(err);
+      });
+    }
+
+    return defer.promise;
+  }
+
+  app.use(bodyParser.text({type: 'application/*'}));
+
+  app.use(express.static('build'));
+
+  app.get('/:key', function(req, res) {
+    get(req.params.key).then(function(val) {
+      res.set('Content-Type', 'application/json');
+      res.send(val);
     },
     function(err) {
       res.send(err);
     });
   });
 
-  app.post('/set/:key', function(req, res) {
-    log('set', req.params.key, req.body);
-    var val;
-    try {
-      val = JSON.parse(req.body);
-      val = msgpack.pack(req.body);
-    }
-    catch (err) {
-      log('error', err);
+  app.post('/:key', function(req, res) {
+    set(req.params.key, req.body).then(function() {
+      res.send();
+    },
+    function(err) {
       res.send(err);
-    }
-    finally {
-      redisSet(req.params.key, val).then(function() {
-        res.send();
-      },
-      function(err) {
-        res.send(err);
-      });
-    }
+    });
   });
 
-  app.listen(8080);
+  io.on('connection', function(socket) {
+    socket.on('get', function(key, fn) {
+      get(key).then(fn);
+    });
+
+    socket.on('set', function(key, val, fn) {
+      set(key, val).then(fn);
+    });
+  });
+
+  server.listen(8080);
 }
