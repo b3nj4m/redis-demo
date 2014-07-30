@@ -1,5 +1,9 @@
 module.exports = {
   init: function(socket) {
-    //beans
+    window.console.log('init', socket);
+
+    socket.emit('get', 'beans', function(val) {
+      window.console.log('beans', window.JSON.parse(val));
+    });
   }
 };

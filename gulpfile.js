@@ -56,13 +56,25 @@ gulp.task('clean-client', function() {
     .pipe(clean());
 });
 
-gulp.task('build-client', ['clean-client'], function() {
+gulp.task('client-static', ['clean-client'], function() {
+  return gulp.src('client/static/**/*')
+    .pipe(gulp.dest('client/build'));
+});
+
+var buildClient = function() {
   return browserify({entries: ['./client/dev/js/index.js'], basedir: '.'})
     .transform(shim)
     .transform(underscorify)
     .bundle()
     .pipe(source('index.js'))
-    .pipe(gulp.dest('./client/build'));
+    .pipe(gulp.dest('client/build'));
+};
+
+gulp.task('build-client', ['clean-client'], buildClient);
+gulp.task('build-client-watch', buildClient);
+
+gulp.task('watch-client', ['clean-client', 'build-client'], function() {
+  gulp.watch('client/dev/js/**/*.js', ['build-client-watch']);
 });
 
-gulp.task('dev', ['redis-server', 'node-server', 'client-server', 'build-client']);
+gulp.task('dev', ['redis-server', 'node-server', 'build-client', 'watch-client', 'client-static']);

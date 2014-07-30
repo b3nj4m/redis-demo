@@ -1,5 +1,6 @@
 var _ = require('underscore');
 var cluster = require('cluster');
+var sticky = require('sticky-session');
 var express = require('express');
 var msgpack = require('msgpack');
 var bodyParser = require('body-parser');
@@ -7,15 +8,8 @@ var http = require('http');
 var socketio = require('socket.io');
 var redis = require('redis');
 var Q = require('q');
-var os = require('os');
 
-//TODO pipe redis pub/sub through messagepack to socket.io
-if (cluster.isMaster) {
-  for (var i = 0; i < os.cpus().length; i++) {
-    cluster.fork();
-  }
-}
-else {
+sticky(function() {
   var worker = cluster.worker;
 
   var app = express();
@@ -23,10 +17,52 @@ else {
   var server = http.createServer(app);
   var io = socketio(server);
 
-  var redisClient = redis.createClient(6379, 'localhost', {return_buffers: true});
+  var redisClient = createRedisClient();
 
   var redisGet = Q.nbind(redisClient.get, redisClient);
   var redisSet = Q.nbind(redisClient.set, redisClient);
+
+  function createRedisClient() {
+    return redis.createClient(6379, 'localhost', {return_buffers: true});
+  }
+
+  function redisSubscribe(channel) {
+    var defer = Q.defer();
+
+    var client = createRedisClient();
+
+    Q.ninvoke(client, 'subscribe', channel).then(function() {
+      defer.resolve(client);
+    },
+    function(err) {
+      defer.reject(err);
+    });
+
+    return defer.promise;
+  }
+
+  function redisUnsubscribe(channel, client) {
+    return Q.ninvoke(client, 'unsubscribe', channel);
+  }
+
+  function subscribe(channel, socket) {
+    return redisSubscribe(channel).then(function(client) {
+      subscribedChannels[channel] = client;
+
+      socket.on('message', function(message, fn) {
+        client.publish(channel, msgpack.pack(message)).then(fn);
+      });
+      client.on('message', function(channel, message) {
+        socket.to(channel).emit('message', msgpack.unpack(message));
+      });
+    });
+  }
+
+  function unsubscribe(channel, client, socket) {
+    return redisUnsubscribe(channel, client).then(function() {
+      socket.leave(channel);
+    });
+  }
 
   function log() {
     return console.log.apply(console, ['worker', worker.id].concat(_.toArray(arguments)));
@@ -60,6 +96,7 @@ else {
     log('set', key, val);
 
     try {
+      //TODO parse isn't needed when using socket.io
       val = JSON.parse(val);
       val = msgpack.pack(val);
     }
@@ -79,30 +116,56 @@ else {
     return defer.promise;
   }
 
+  function subscribe(channel) {
+    log('subscribe', channel);
+
+    return redisSubscribe(channel);
+  }
+
+  function unsubscribe(channel) {
+    log('unsubscribe', channel);
+
+    return redisUnsubscribe(channel);
+  }
+
+  function handleErrorHttp(req, res) {
+    return function(err) {
+      res.status(500).send(err);
+    };
+  }
+
   app.use(bodyParser.text({type: 'application/*'}));
 
-  app.use(express.static('build'));
+  app.use(express.static('client/build'));
 
-  app.get('/:key', function(req, res) {
+  app.get('/api/:key', function(req, res) {
     get(req.params.key).then(function(val) {
       res.set('Content-Type', 'application/json');
       res.send(val);
-    },
-    function(err) {
-      res.send(err);
-    });
+    }, handleErrorHttp(req, res));
   });
 
-  app.post('/:key', function(req, res) {
+  app.post('/api/:key', function(req, res) {
     set(req.params.key, req.body).then(function() {
       res.send();
-    },
-    function(err) {
-      res.send(err);
-    });
+    }, handleErrorHttp(req, res));
+  });
+
+  app.post('/api/subscribe/:channel', function(req, res) {
+    subscribe(req.params.channel).then(function() {
+      res.send();
+    }, handleErrorHttp(req, res));
+  });
+
+  app.post('/api/unsubscribe/:channel', function(req, res) {
+    unsubscribe(req.params.channel).then(function() {
+      res.send();
+    }, handleErrorHttp(req, res));
   });
 
   io.on('connection', function(socket) {
+    var subscribedChannels = {};
+
     socket.on('get', function(key, fn) {
       get(key).then(fn);
     });
@@ -110,7 +173,20 @@ else {
     socket.on('set', function(key, val, fn) {
       set(key, val).then(fn);
     });
+
+    socket.on('subscribe', function(channel, fn) {
+      subscribe(channel).then(fn);
+    });
+
+    socket.on('unsubscribe', function(channel, fn) {
+      if (subscribedChannels[channel]) {
+        unsubscribe(channel, subscribedChannels[channel], socket).then(fn);
+      }
+      else {
+        fn();
+      }
+    });
   });
 
-  server.listen(8080);
-}
+  return server;
+}).listen(8080);
