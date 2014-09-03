@@ -177,7 +177,7 @@ sticky(function() {
     });
 
     socket.on('message', function(channel, data) {
-      io.to(channel).emit('message', data);
+      io.to(channel).emit('message', channel, data);
     });
 
     socket.on('subscribe', function(channel) {

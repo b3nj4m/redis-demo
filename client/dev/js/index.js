@@ -1,8 +1,9 @@
-var socketio = require('socket.io-client');
+var Backbone = require('backbone');
 var $ = require('jquery');
 var app = require('./app');
 
+Backbone.$ = $;
+
 $(window.document).ready(function() {
-  var socket = socketio('http://localhost:8080');
-  app.init(socket);
+  app.init();
 });
