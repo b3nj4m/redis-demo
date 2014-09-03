@@ -7,6 +7,7 @@ var bodyParser = require('body-parser');
 var http = require('http');
 var socketio = require('socket.io');
 var redis = require('redis');
+var socketRedis = require('socket.io-redis');
 var Q = require('q');
 
 sticky(function() {
@@ -16,6 +17,7 @@ sticky(function() {
 
   var server = http.createServer(app);
   var io = socketio(server);
+  io.adapter(socketRedis({host: 'localhost'}));
 
   var redisClient = createRedisClient();
 
@@ -174,17 +176,16 @@ sticky(function() {
       set(key, val).then(fn);
     });
 
-    socket.on('subscribe', function(channel, fn) {
-      subscribe(channel).then(fn);
+    socket.on('message', function(channel, data) {
+      io.to(channel).emit('message', data);
     });
 
-    socket.on('unsubscribe', function(channel, fn) {
-      if (subscribedChannels[channel]) {
-        unsubscribe(channel, subscribedChannels[channel], socket).then(fn);
-      }
-      else {
-        fn();
-      }
+    socket.on('subscribe', function(channel) {
+      socket.join(channel);
+    });
+
+    socket.on('unsubscribe', function(channel) {
+      socket.leave(channel);
     });
   });
 
